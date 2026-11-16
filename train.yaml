@@ -1,15 +1,19 @@
-# CLI path for the same GPU training step that the bundle runs as an ai_runtime_task.
+# Single source of truth for the GPU training step ("step 03" in the notebook story).
+#   * dev loop:   `databricks air run -f train.yaml` (ephemeral run)
+#   * production: the bundle's `train` ai_runtime_task, GENERATED from this file by
+#                 `databricks air convert-to-dabs` (a DAB task can't reference this YAML directly).
+#                 See scripts/demo_convert_to_dabs.sh for the generate-and-diff demo.
 #
 #   databricks air run -f train.yaml --watch   -p <profile>   # submit + stream logs
 #   databricks air run -f train.yaml --dry-run -p <profile>   # validate only
 #   databricks air run -f train.yaml --watch   -p <profile> \
 #       --override env_variables.CATALOG=my_catalog --override env_variables.SCHEMA=my_schema
-#   databricks air convert-to-dabs train.yaml --output-dir /tmp/air-bundle   # scaffold a bundle
+#   bash scripts/demo_convert_to_dabs.sh --profile <profile>   # convert-to-dabs into /tmp + diff
 #
-# Prerequisite: run the bundle's `prep` task once, so the curated dataset exists in
+# Prerequisite: run the bundle's `prep` task (notebooks/01_prep) once, so the curated dataset exists in
 # /Volumes/<CATALOG>/<SCHEMA>/raw_images/.
 experiment_name: mlb-air-yolo
-mlflow_run_name: yolov8s-a10-cli
+mlflow_run_name: yolov8s-a10 # the DAB train task uses the same name (generated from this file)
 
 compute:
   accelerator_type: GPU_1xA10

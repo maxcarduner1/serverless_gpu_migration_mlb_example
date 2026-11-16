@@ -1,0 +1,44 @@
+# MLB CV demo: Serverless GPU (AI Runtime) training with the native
+# `ai_runtime_task` DABs task type.
+#
+#   databricks bundle validate -t dev -p DEFAULT
+#   databricks bundle deploy   -t dev -p DEFAULT
+#   databricks bundle run mlb_air_yolo_train -t dev -p DEFAULT
+bundle:
+  name: mlb_air_yolo_demo
+
+include:
+  - resources/*.yml
+
+# Package the GPU training code (src/train) as a tarball. `ai_runtime_task`
+# unpacks it on every GPU node. This is the same layout that
+# `databricks air convert-to-dabs train.yaml` generates.
+artifacts:
+  train_code:
+    type: tgz
+    path: src
+    include:
+      - train
+    files:
+      - source: ./dist/train_code.tgz
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for tables, volumes and the registered model
+    default: cmegdemos_catalog
+  schema:
+    description: Unity Catalog schema
+    default: mlb_air_migration
+  model_name:
+    description: Registered model name (created in <catalog>.<schema>)
+    default: mlb_yolo_detector
+  experiment:
+    description: MLflow experiment name for the GPU training task
+    default: mlb-air-yolo
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-cmegdemos.cloud.databricks.com

@@ -1,0 +1,33 @@
+# CLI path for the same GPU training step that the bundle runs as an ai_runtime_task.
+#
+#   databricks air run -f train.yaml --watch -p DEFAULT        # submit and stream logs
+#   databricks air run -f train.yaml --dry-run -p DEFAULT      # validate only
+#   databricks air convert-to-dabs train.yaml --output-dir /tmp/air-bundle   # scaffold a bundle
+#
+# Prerequisite: run the `prep` task once (or the whole bundle job) so the
+# curated dataset exists in /Volumes/cmegdemos_catalog/mlb_air_migration/raw_images/yolo.
+experiment_name: mlb-air-yolo
+mlflow_run_name: yolov8s-a10-cli
+
+compute:
+  accelerator_type: GPU_1xA10
+  num_accelerators: 1
+
+environment:
+  version: 6
+  dependencies:
+    - ultralytics==8.4.90 # preinstalled in AI env v6; the pin keeps it reproducible
+    - mlflow>=3.1
+
+# Upload only the training code (a subdirectory, not the repo root).
+code_source:
+  root_path: src/train
+
+max_retries: 0 # don't burn GPU time on blind retries
+timeout_minutes: 60
+
+command: |
+  for d in "${CODE_SOURCE:-}" "${CODE_SOURCE_PATH:-}" "$PWD"; do
+    if [ -n "$d" ] && [ -f "$d/train.py" ]; then cd "$d"; break; fi
+  done
+  python train.py --epochs 30 --base_model yolov8s.pt

@@ -1,0 +1,81 @@
+# prep (serverless CPU) -> train (AI Runtime, 1x A10) -> infer (serverless CPU)
+resources:
+  jobs:
+    mlb_air_yolo_train:
+      name: mlb_air_yolo_train
+      description: >-
+        MLB CV demo. Roboflow ball/bat/glove data goes to a UC Volume and
+        a YOLOv8 fine-tune runs on Serverless GPU (ai_runtime_task, GPU_1xA10).
+        Batch inference writes a Delta table and annotated images.
+      max_concurrent_runs: 1
+      timeout_seconds: 10800 # 3h hard stop for the whole pipeline
+      tags:
+        demo: mlb-air-yolo
+
+      tasks:
+        # 1) CPU: download (once), merge classes, subsample, write the manifest
+        - task_key: prep
+          environment_key: prep_env
+          max_retries: 1 # idempotent: already-downloaded datasets are skipped
+          min_retry_interval_millis: 60000
+          timeout_seconds: 3600
+          spark_python_task:
+            python_file: ../src/prep/prep.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+
+        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime)
+        - task_key: train
+          depends_on:
+            - task_key: prep
+          environment_key: train_env
+          max_retries: 0 # no blind retries on GPU; rerun the job instead
+          retry_on_timeout: false
+          timeout_seconds: 3600
+          ai_runtime_task:
+            experiment: ${var.experiment}
+            mlflow_run: yolov8s-a10
+            # Resolved from the bundle root (not this file). Must match artifacts.train_code.files.
+            code_source_path: ./dist/train_code.tgz
+            deployments:
+              - name: trainer
+                command_path: ../src/train/command.sh
+                compute:
+                  accelerator_type: GPU_1xA10
+                  accelerator_count: 1
+
+        # 3) CPU: batch inference on held-out images
+        - task_key: infer
+          depends_on:
+            - task_key: train
+          environment_key: infer_env
+          max_retries: 0
+          timeout_seconds: 2700
+          spark_python_task:
+            python_file: ../src/infer/infer.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+              - --model_name=${var.model_name}
+
+      environments:
+        - environment_key: prep_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - pyyaml
+        - environment_key: train_env
+          spec:
+            environment_version: "6"
+            dependencies:
+              # ultralytics 8.4.90 ships in the AI v6 env. This pin keeps the
+              # Standard v6 image on the same version and adds it if missing.
+              - ultralytics==8.4.90
+              - mlflow>=3.1
+        - environment_key: infer_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ultralytics==8.4.90
+              - mlflow>=3.1

@@ -1,4 +1,8 @@
-"""Prep task (serverless CPU).
+"""Prep logic (serverless CPU), shared by the `01_prep` notebook task.
+
+The job runs notebooks/01_prep.py, which imports this module and calls
+`main(["--catalog", ..., "--schema", ...])`. It also still runs as a plain script:
+`python prep.py --catalog <c> --schema <s>`.
 
 Roboflow Universe datasets  ->  /Volumes/<catalog>/<schema>/raw_images
 
@@ -65,7 +69,7 @@ API = "https://api.roboflow.com"
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--catalog", required=True)
     p.add_argument("--schema", required=True)
@@ -77,7 +81,7 @@ def parse_args():
                    help="pick the smallest dataset version with at least this many images")
     p.add_argument("--seed", type=int, default=42)
     # parse_known_args: ignore anything extra the Jobs runtime passes through
-    return p.parse_known_args()[0]
+    return p.parse_known_args(argv)[0]
 
 
 def get_api_key():
@@ -216,8 +220,9 @@ def collect(extract_dir):
 
 
 # --------------------------------------------------------------------------- main
-def main():
-    args = parse_args()
+def main(argv=None):
+    """Run prep. Returns the manifest table name."""
+    args = parse_args(argv)
     rng = random.Random(args.seed)
     vol = Path(f"/Volumes/{args.catalog}/{args.schema}/{args.volume}")
     if not vol.exists():
@@ -311,6 +316,7 @@ def main():
         FROM {table} GROUP BY ALL ORDER BY split, source_dataset""")
     summary.show(truncate=False)
     print(f"Manifest table: {table}")
+    return table
 
 
 if __name__ == "__main__":

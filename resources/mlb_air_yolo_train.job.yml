@@ -1,4 +1,5 @@
-# prep (serverless CPU) -> train (AI Runtime, 1x A10) -> infer (AI Runtime, 1x A10) -> publish (serverless CPU)
+# prep (notebook, serverless CPU) -> train (ai_runtime_task, 1x A10) -> infer (ai_runtime_task, 1x A10)
+#   -> publish (notebook, serverless CPU)
 resources:
   jobs:
     mlb_air_yolo_train:
@@ -13,38 +14,47 @@ resources:
         demo: mlb-air-yolo
 
       tasks:
-        # 1) CPU: download (once), merge classes, subsample, write the manifest
+        # 1) CPU notebook: download (once), merge classes, subsample, write the manifest
         - task_key: prep
-          environment_key: prep_env
           max_retries: 1 # idempotent: already-downloaded datasets are skipped
           min_retry_interval_millis: 60000
           timeout_seconds: 3600
-          spark_python_task:
-            python_file: ../src/prep/prep.py
-            parameters:
-              - --catalog=${var.catalog}
-              - --schema=${var.schema}
+          notebook_task:
+            notebook_path: ../notebooks/01_prep.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              model_name: ${var.model_name}
 
-        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime).
-        #    ai_runtime_task has no parameters field. catalog/schema/model_name reach the node
-        #    via run_config.env, which the train_code artifact build writes from ${var.*}.
+        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime) -- "step 03" of the notebook story.
+        #    GENERATED from train.yaml by `databricks air convert-to-dabs train.yaml` (an ai_runtime_task
+        #    can't reference a YAML file; there is no such field). train.yaml stays the single source of
+        #    truth: compute, environment, retries/timeout, experiment and run name come from it.
+        #    Edits layered on top of the generated task (see scripts/demo_convert_to_dabs.sh for the diff):
+        #      * experiment: ${var.experiment} (same default as train.yaml experiment_name)
+        #      * code_source_path: ./dist/train_code.tgz, built by scripts/package_code.sh. Same train/
+        #        layout as the generated code_source.tgz, plus run_config.env with the bundle variables,
+        #        because convert-to-dabs writes train.yaml env_variables to env_vars.json but the task
+        #        has no env/parameters field to wire it into.
+        #      * command_path: ../src/train/command.sh, which the generated wrapper
+        #        (generated_artifacts/command.sh = train.yaml `command`) only cd's into and runs.
+        #      * task_key/environment_key/depends_on: names and DAG position in this job.
         - task_key: train
           depends_on:
             - task_key: prep
           environment_key: train_env
-          max_retries: 0 # no blind retries on GPU; rerun the job instead
+          max_retries: 0 # train.yaml max_retries: 0 (no blind retries on GPU; rerun the job instead)
           retry_on_timeout: false
-          timeout_seconds: 3600
+          timeout_seconds: 3600 # train.yaml timeout_minutes: 60
           ai_runtime_task:
             experiment: ${var.experiment}
-            mlflow_run: yolov8s-a10
+            mlflow_run: yolov8s-a10 # train.yaml mlflow_run_name
             # Resolved from the bundle root (not this file). Must match artifacts.train_code.files.
             code_source_path: ./dist/train_code.tgz
             deployments:
-              - name: trainer
-                command_path: ../src/train/command.sh
+              - command_path: ../src/train/command.sh
                 compute:
-                  accelerator_type: GPU_1xA10
+                  accelerator_type: GPU_1xA10 # train.yaml compute
                   accelerator_count: 1
 
         # 3) GPU: batch inference on the held-out images (same AI env as training).
@@ -68,29 +78,24 @@ resources:
                   accelerator_type: GPU_1xA10
                   accelerator_count: 1
 
-        # 4) CPU: publish the GPU predictions (parquet in the Volume) to a Delta table
+        # 4) CPU notebook: publish predictions.parquet to Delta, then review metrics, table and images
         - task_key: publish
           depends_on:
             - task_key: infer
-          environment_key: prep_env
-          max_retries: 1
+          max_retries: 1 # idempotent: replaces this inference run's rows
           timeout_seconds: 1200
-          spark_python_task:
-            python_file: ../src/publish/publish.py
-            parameters:
-              - --catalog=${var.catalog}
-              - --schema=${var.schema}
+          notebook_task:
+            notebook_path: ../notebooks/04_publish_and_review.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              model_name: ${var.model_name}
 
       environments:
-        - environment_key: prep_env
-          spec:
-            environment_version: "4"
-            dependencies:
-              - pyyaml
         - environment_key: train_env
           spec:
             # AI environment v6: torch (CUDA 13), ultralytics, and mlflow are preinstalled.
-            # Same mapping as `environment.version: databricks_ai_v6` in train.yaml
-            # (see `databricks air convert-to-dabs`). Don't layer PyPI torch/opencv on
+            # Generated from `environment.version: databricks_ai_v6` in train.yaml by
+            # `databricks air convert-to-dabs` (used by both GPU tasks). Don't layer PyPI torch/opencv on
             # top: a fresh wheel stack failed the host's OpenSSL FIPS self-test.
             base_environment: workspace-base-environments/databricks_ai_v6

@@ -20,6 +20,7 @@ import argparse
 import os
 import random
 import shutil
+import tarfile
 import tempfile
 import time
 import zipfile
@@ -259,6 +260,14 @@ def main():
         shutil.rmtree(out_dir)
     shutil.copytree(stage, out_dir)
     print(f"Wrote {len(rows)} images + data.yaml to {out_dir}")
+
+    # Also write the curated set as ONE tar file. Reading thousands of small files through
+    # the Volume mount is slow; the GPU task copies this single file and extracts it locally.
+    tar_local = stage.parent / "yolo_dataset.tar"
+    with tarfile.open(tar_local, "w") as tar:
+        tar.add(stage, arcname="yolo")
+    shutil.copyfile(tar_local, vol / "yolo_dataset.tar")
+    print(f"Wrote {vol / 'yolo_dataset.tar'} ({tar_local.stat().st_size / 1e6:.1f} MB)")
 
     # Delta manifest
     from pyspark.sql import SparkSession

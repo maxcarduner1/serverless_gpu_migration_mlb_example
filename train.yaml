@@ -13,11 +13,10 @@ compute:
   accelerator_type: GPU_1xA10
   num_accelerators: 1
 
+# AI environment v6: torch, ultralytics, and mlflow are preinstalled. Same as the
+# bundle's base_environment: workspace-base-environments/databricks_ai_v6.
 environment:
-  version: 6
-  dependencies:
-    - ultralytics==8.4.90 # preinstalled in AI env v6; the pin keeps it reproducible
-    - mlflow>=3.1
+  version: databricks_ai_v6
 
 # Upload only the training code (a subdirectory, not the repo root).
 code_source:
@@ -27,7 +26,7 @@ max_retries: 0 # don't burn GPU time on blind retries
 timeout_minutes: 60
 
 command: |
-  for d in "${CODE_SOURCE:-}" "${CODE_SOURCE_PATH:-}" "$PWD"; do
+  for d in "${CODE_SOURCE_PATH:-}" "$PWD"; do
     if [ -n "$d" ] && [ -f "$d/train.py" ]; then cd "$d"; break; fi
   done
-  python train.py --epochs 30 --base_model yolov8s.pt
+  python -u train.py --epochs 30 --base_model yolov8s.pt

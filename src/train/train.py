@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import tarfile
 import sys
 import time
 from pathlib import Path
@@ -59,11 +60,22 @@ def main():
 
     print("MLflow/launcher env:", sorted(k for k in os.environ if k.startswith(("MLFLOW_", "CODE_SOURCE", "NUM_NODES", "LOCAL_WORLD"))))
 
-    # 1) Volume -> local disk (small dataset; local NVMe is much faster than FUSE for random reads)
-    local = Path("/tmp/yolo_data")
-    if local.exists():
-        shutil.rmtree(local)
-    shutil.copytree(src_data, local)
+    # 1) Volume -> local disk. Copy ONE tar file and extract it locally: per-file reads through
+    #    the Volume mount are slow (thousands of small images), a single sequential read is fast.
+    t0 = time.time()
+    work = Path("/tmp/yolo_work")
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    tar_src = vol / "raw_images" / "yolo_dataset.tar"
+    if tar_src.exists():
+        shutil.copyfile(tar_src, work / "yolo_dataset.tar")
+        with tarfile.open(work / "yolo_dataset.tar") as tar:
+            tar.extractall(work, filter="data")
+    else:  # fallback: per-file copy (slow)
+        shutil.copytree(src_data, work / "yolo")
+    local = work / "yolo"
+    print(f"Dataset copied to local disk in {time.time() - t0:.0f}s")
     data_cfg = yaml.safe_load((local / "data.yaml").read_text())
     data_cfg["path"] = str(local)
     (local / "data.yaml").write_text(yaml.safe_dump(data_cfg, sort_keys=False))

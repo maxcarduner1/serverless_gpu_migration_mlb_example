@@ -67,12 +67,11 @@ resources:
               - pyyaml
         - environment_key: train_env
           spec:
-            environment_version: "6"
-            dependencies:
-              # ultralytics 8.4.90 ships in the AI v6 env. This pin keeps the
-              # Standard v6 image on the same version and adds it if missing.
-              - ultralytics==8.4.90
-              - mlflow>=3.1
+            # AI environment v6: torch (CUDA 13), ultralytics, and mlflow are preinstalled.
+            # Same mapping as `environment.version: databricks_ai_v6` in train.yaml
+            # (see `databricks air convert-to-dabs`). Don't layer PyPI torch/opencv on
+            # top: a fresh wheel stack failed the host's OpenSSL FIPS self-test.
+            base_environment: workspace-base-environments/databricks_ai_v6
         - environment_key: infer_env
           spec:
             environment_version: "4"

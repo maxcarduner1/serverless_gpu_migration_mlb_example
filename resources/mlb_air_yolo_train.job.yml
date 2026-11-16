@@ -1,4 +1,4 @@
-# prep (serverless CPU) -> train (AI Runtime, 1x A10) -> infer (serverless CPU)
+# prep (serverless CPU) -> train (AI Runtime, 1x A10) -> infer (AI Runtime, 1x A10) -> publish (serverless CPU)
 resources:
   jobs:
     mlb_air_yolo_train:
@@ -6,7 +6,7 @@ resources:
       description: >-
         MLB CV demo. Roboflow ball/bat/glove data goes to a UC Volume and
         a YOLOv8 fine-tune runs on Serverless GPU (ai_runtime_task, GPU_1xA10).
-        Batch inference writes a Delta table and annotated images.
+        GPU batch inference writes annotated images and a Delta predictions table.
       max_concurrent_runs: 1
       timeout_seconds: 10800 # 3h hard stop for the whole pipeline
       tags:
@@ -45,19 +45,38 @@ resources:
                   accelerator_type: GPU_1xA10
                   accelerator_count: 1
 
-        # 3) CPU: batch inference on held-out images
+        # 3) GPU: batch inference on the held-out images (same AI env as training)
         - task_key: infer
           depends_on:
             - task_key: train
-          environment_key: infer_env
+          environment_key: train_env
           max_retries: 0
-          timeout_seconds: 2700
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          ai_runtime_task:
+            experiment: ${var.experiment}-infer
+            mlflow_run: yolov8s-batch-infer
+            # Resolved from the bundle root (not this file). Must match artifacts.infer_code.files.
+            code_source_path: ./dist/infer_code.tgz
+            deployments:
+              - name: inference
+                command_path: ../src/infer/command.sh
+                compute:
+                  accelerator_type: GPU_1xA10
+                  accelerator_count: 1
+
+        # 4) CPU: publish the GPU predictions (parquet in the Volume) to a Delta table
+        - task_key: publish
+          depends_on:
+            - task_key: infer
+          environment_key: prep_env
+          max_retries: 1
+          timeout_seconds: 1200
           spark_python_task:
-            python_file: ../src/infer/infer.py
+            python_file: ../src/publish/publish.py
             parameters:
               - --catalog=${var.catalog}
               - --schema=${var.schema}
-              - --model_name=${var.model_name}
 
       environments:
         - environment_key: prep_env
@@ -72,9 +91,3 @@ resources:
             # (see `databricks air convert-to-dabs`). Don't layer PyPI torch/opencv on
             # top: a fresh wheel stack failed the host's OpenSSL FIPS self-test.
             base_environment: workspace-base-environments/databricks_ai_v6
-        - environment_key: infer_env
-          spec:
-            environment_version: "4"
-            dependencies:
-              - ultralytics==8.4.90
-              - mlflow>=3.1

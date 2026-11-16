@@ -6,7 +6,7 @@ training step can be launched two ways:
 
 | Path | When to use | Entry point |
 |---|---|---|
-| **DABs `ai_runtime_task`** | scheduled / CI-CD-deployed pipelines (CPU prep → GPU train → CPU infer) | `databricks.yml` + `resources/mlb_air_yolo_train.job.yml` |
+| **DABs `ai_runtime_task`** | scheduled / CI-CD-deployed pipelines (CPU prep → GPU train → GPU infer → CPU publish) | `databricks.yml` + `resources/mlb_air_yolo_train.job.yml` |
 | **`databricks air run` CLI** | fast dev loop on the training script | `train.yaml` |
 
 `legacy/notebook_before.py` shows the **old** way: a notebook on GPU env v4 with the deprecated
@@ -15,12 +15,14 @@ deployed. See `docs/migration.md` for the full migration guide.
 
 ```
 databricks.yml                         bundle, variables (catalog/schema/model/experiment), dev target
-resources/mlb_air_yolo_train.job.yml   job: prep -> train (ai_runtime_task, GPU_1xA10) -> infer
+resources/mlb_air_yolo_train.job.yml   job: prep -> train -> infer (both ai_runtime_task, GPU_1xA10) -> publish
 src/prep/prep.py                       serverless CPU: Roboflow -> UC Volume, class merge, subsample, manifest table
 src/train/train.py                     YOLOv8s fine-tune, MLflow logging, Volume checkpoints, UC model registration
 src/train/yolo_pyfunc.py               MLflow pyfunc wrapper (image_path -> detections JSON)
 src/train/command.sh                   launch script used by the ai_runtime_task
-src/infer/infer.py                     serverless CPU: batch inference -> annotated images, montage/GIF, Delta table
+src/infer/infer.py                     GPU batch inference -> annotated images, montage/GIF, predictions.parquet
+src/infer/command.sh                   launch script used by the infer ai_runtime_task
+src/publish/publish.py                 serverless CPU: predictions.parquet -> Delta table
 train.yaml                             `databricks air run` workload (same training code)
 legacy/notebook_before.py              BEFORE: serverless_gpu notebook (deprecated API)
 docs/migration.md                      serverless_gpu -> AI Runtime migration notes
@@ -49,23 +51,26 @@ databricks bundle deploy   -t dev -p <profile>
 databricks bundle run mlb_air_yolo_train -t dev -p <profile>
 ```
 
-The job (`max_concurrent_runs: 1`) has three tasks:
+The job (`max_concurrent_runs: 1`) has four tasks:
 
 1. **prep** (serverless CPU, `max_retries: 1`)
    * Downloads each Roboflow dataset **once**, as a YOLOv8 export zip, to
      `/Volumes/<catalog>/<schema>/raw_images/sources/`. Later runs reuse the zip and make no Roboflow call.
    * Remaps classes to `0=ball, 1=bat, 2=glove` and subsamples to about 1,800 train / 300 val / 60 test images.
-   * Writes `raw_images/yolo/{train,val,test}` + `data.yaml` and the Delta table `<catalog>.<schema>.yolo_manifest`
+   * Writes `raw_images/yolo/{train,val,test}` + `data.yaml`, a single-file copy `raw_images/yolo_dataset.tar`,
+     and the Delta table `<catalog>.<schema>.yolo_manifest`
      (split, per-image class counts, source dataset/version, license, attribution URL).
 2. **train** (`ai_runtime_task`, `GPU_1xA10` × 1, `max_retries: 0`, 1h timeout)
-   * Copies the dataset to local NVMe and fine-tunes `yolov8s.pt` for 30 epochs at 640px.
+   * Copies `yolo_dataset.tar` (one file, ~150 MB) to local disk, extracts it, and fine-tunes `yolov8s.pt` for 30 epochs at 640px.
    * Logs params, per-epoch metrics (mAP50, mAP50-95, losses), plots, and `results.csv` to MLflow.
    * Mirrors checkpoints to `/Volumes/<catalog>/<schema>/artifacts/checkpoints/<ts>/`.
    * Registers `<catalog>.<schema>.mlb_yolo_detector` in Unity Catalog with the alias `@champion`.
-3. **infer** (serverless CPU)
+3. **infer** (`ai_runtime_task`, `GPU_1xA10` × 1, same AI v6 environment)
    * Loads `models:/<catalog>.<schema>.mlb_yolo_detector@champion` and runs it on the held-out test split.
-   * Writes annotated images, `montage.jpg`, and `demo.gif` to `artifacts/inference/<ts>/`.
-   * Appends detections to `<catalog>.<schema>.yolo_predictions`.
+   * Writes annotated images, `montage.jpg`, `demo.gif`, and `predictions.parquet` to `artifacts/inference/<ts>/`.
+     The montage and GIF are also logged to the MLflow experiment `mlb-air-yolo-infer`.
+4. **publish** (serverless CPU)
+   * Appends `predictions.parquet` to the Delta table `<catalog>.<schema>.yolo_predictions`.
 
 How the training code gets to the GPU: the `artifacts.train_code` block in `databricks.yml` packages
 `src/train` as a tarball (`type: tgz`). The `ai_runtime_task` gets it via `code_source_path`, unpacks
@@ -82,7 +87,7 @@ databricks air run -f train.yaml --watch   -p <profile>   # submit + stream logs
 ```
 
 `train.yaml` uploads only `src/train` (`code_source.root_path`). It uses the same accelerator
-(`GPU_1xA10`), environment version (6), and dependencies as the bundle task, with
+(`GPU_1xA10`) and the same AI v6 environment (`version: databricks_ai_v6`) as the bundle task, with
 `max_retries: 0` and `timeout_minutes: 60`. To turn it into a bundle scaffold:
 
 ```bash
@@ -113,12 +118,24 @@ dataset, cached in the Volume) and subsampled, to stay well inside Roboflow free
 CC BY 4.0 requires attribution. Credit the dataset authors above when you share results or images.
 Pretrained weights (`yolov8s.pt`) and the `ultralytics` library are © Ultralytics, under AGPL-3.0.
 
-## Notes and knobs
+## Notes and lessons learned
 
 * GPU: this demo uses **`GPU_1xA10` only**. Change `accelerator_type` / `accelerator_count` in the job
   YAML or `train.yaml` to scale up.
-* `ai_runtime_task` has no task parameters. Training hyperparameters live in `src/train/command.sh`
-  and `train.yaml`. Catalog/schema default to the bundle defaults in `train.py`.
-* Environment: `environment_version: "6"` with `ultralytics==8.4.90` pinned. That version is
-  preinstalled in the AI v6 environment, and the pin keeps the run reproducible.
-* Dataset size: `prep.py --max_train/--max_val/--max_test`. Training length: `--epochs` (30 by default, sized for about 30 min on one A10).
+* **Use the AI environment for GPU tasks.** `environment.version: databricks_ai_v6` in `train.yaml`
+  maps to `base_environment: workspace-base-environments/databricks_ai_v6` in DABs (that's what
+  `databricks air convert-to-dabs` emits). It ships torch 2.11 (CUDA 13), ultralytics 8.4.90, and mlflow.
+  The Standard v6 image has no torch. Pip-installing `ultralytics` on top pulled the newest torch,
+  opencv, and CUDA wheels from PyPI, and the process aborted with `OpenSSL ... FATAL FIPS SELFTEST FAILURE`.
+  The same thing happened for CPU inference on serverless with PyPI ultralytics, which is why
+  inference also runs on the AI GPU env and only the Delta write runs on CPU.
+* **Ship many small files as one archive.** Copying about 4.3k images and labels file-by-file from
+  the Volume took about 14 minutes on the GPU node. Copying one ~150 MB tar and extracting it locally took 3 s.
+* `ai_runtime_task.code_source_path` is resolved from the bundle root, not relative to the
+  resources file. Inside the node, the archive is unpacked at `$CODE_SOURCE_PATH/<subdir>`, and
+  `MLFLOW_RUN_ID` / `MLFLOW_EXPERIMENT_ID` are injected (`mlflow.start_run()` resumes that run).
+* `ai_runtime_task` has no task parameters. Hyperparameters live in `src/train/command.sh` and
+  `train.yaml`. Catalog, schema, and model name default to the bundle defaults in the scripts.
+* Dataset size: `prep.py --max_train/--max_val/--max_test`. Training length: `--epochs`. 30 epochs on
+  1,800 images took about 8.5 min of training on one A10 (about 11 min for the whole task, including
+  provisioning and environment setup).

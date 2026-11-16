@@ -10,8 +10,8 @@ bundle:
 include:
   - resources/*.yml
 
-# Package the GPU training code (src/train) as a tarball. `ai_runtime_task`
-# unpacks it on every GPU node. This is the same layout that
+# Package the GPU code (src/train, src/infer) as tarballs. `ai_runtime_task`
+# unpacks them on every GPU node. This is the same layout that
 # `databricks air convert-to-dabs train.yaml` generates.
 artifacts:
   train_code:
@@ -21,6 +21,13 @@ artifacts:
       - train
     files:
       - source: ./dist/train_code.tgz
+  infer_code:
+    type: tgz
+    path: src
+    include:
+      - infer
+    files:
+      - source: ./dist/infer_code.tgz
 
 variables:
   catalog:

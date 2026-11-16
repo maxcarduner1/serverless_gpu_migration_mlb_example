@@ -1,0 +1,96 @@
+# prep (serverless CPU) -> train (AI Runtime, 1x A10) -> infer (AI Runtime, 1x A10) -> publish (serverless CPU)
+resources:
+  jobs:
+    mlb_air_yolo_train:
+      name: mlb_air_yolo_train
+      description: >-
+        MLB CV demo. Roboflow ball/bat/glove data goes to a UC Volume and
+        a YOLOv8 fine-tune runs on Serverless GPU (ai_runtime_task, GPU_1xA10).
+        GPU batch inference writes annotated images and a Delta predictions table.
+      max_concurrent_runs: 1
+      timeout_seconds: 10800 # 3h hard stop for the whole pipeline
+      tags:
+        demo: mlb-air-yolo
+
+      tasks:
+        # 1) CPU: download (once), merge classes, subsample, write the manifest
+        - task_key: prep
+          environment_key: prep_env
+          max_retries: 1 # idempotent: already-downloaded datasets are skipped
+          min_retry_interval_millis: 60000
+          timeout_seconds: 3600
+          spark_python_task:
+            python_file: ../src/prep/prep.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+
+        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime).
+        #    ai_runtime_task has no parameters field. catalog/schema/model_name reach the node
+        #    via run_config.env, which the train_code artifact build writes from ${var.*}.
+        - task_key: train
+          depends_on:
+            - task_key: prep
+          environment_key: train_env
+          max_retries: 0 # no blind retries on GPU; rerun the job instead
+          retry_on_timeout: false
+          timeout_seconds: 3600
+          ai_runtime_task:
+            experiment: ${var.experiment}
+            mlflow_run: yolov8s-a10
+            # Resolved from the bundle root (not this file). Must match artifacts.train_code.files.
+            code_source_path: ./dist/train_code.tgz
+            deployments:
+              - name: trainer
+                command_path: ../src/train/command.sh
+                compute:
+                  accelerator_type: GPU_1xA10
+                  accelerator_count: 1
+
+        # 3) GPU: batch inference on the held-out images (same AI env as training).
+        #    Variables arrive via run_config.env in the infer_code artifact (see databricks.yml).
+        - task_key: infer
+          depends_on:
+            - task_key: train
+          environment_key: train_env
+          max_retries: 0
+          retry_on_timeout: false
+          timeout_seconds: 1800
+          ai_runtime_task:
+            experiment: ${var.experiment}-infer
+            mlflow_run: yolov8s-batch-infer
+            # Resolved from the bundle root (not this file). Must match artifacts.infer_code.files.
+            code_source_path: ./dist/infer_code.tgz
+            deployments:
+              - name: inference
+                command_path: ../src/infer/command.sh
+                compute:
+                  accelerator_type: GPU_1xA10
+                  accelerator_count: 1
+
+        # 4) CPU: publish the GPU predictions (parquet in the Volume) to a Delta table
+        - task_key: publish
+          depends_on:
+            - task_key: infer
+          environment_key: prep_env
+          max_retries: 1
+          timeout_seconds: 1200
+          spark_python_task:
+            python_file: ../src/publish/publish.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+
+      environments:
+        - environment_key: prep_env
+          spec:
+            environment_version: "4"
+            dependencies:
+              - pyyaml
+        - environment_key: train_env
+          spec:
+            # AI environment v6: torch (CUDA 13), ultralytics, and mlflow are preinstalled.
+            # Same mapping as `environment.version: databricks_ai_v6` in train.yaml
+            # (see `databricks air convert-to-dabs`). Don't layer PyPI torch/opencv on
+            # top: a fresh wheel stack failed the host's OpenSSL FIPS self-test.
+            base_environment: workspace-base-environments/databricks_ai_v6

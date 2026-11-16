@@ -1,0 +1,43 @@
+# CLI path for the same GPU training step that the bundle runs as an ai_runtime_task.
+#
+#   databricks air run -f train.yaml --watch   -p <profile>   # submit + stream logs
+#   databricks air run -f train.yaml --dry-run -p <profile>   # validate only
+#   databricks air run -f train.yaml --watch   -p <profile> \
+#       --override env_variables.CATALOG=my_catalog --override env_variables.SCHEMA=my_schema
+#   databricks air convert-to-dabs train.yaml --output-dir /tmp/air-bundle   # scaffold a bundle
+#
+# Prerequisite: run the bundle's `prep` task once, so the curated dataset exists in
+# /Volumes/<CATALOG>/<SCHEMA>/raw_images/.
+experiment_name: mlb-air-yolo
+mlflow_run_name: yolov8s-a10-cli
+
+compute:
+  accelerator_type: GPU_1xA10
+  num_accelerators: 1
+
+# AI environment v6: torch, ultralytics, and mlflow are preinstalled. Same as the
+# bundle's base_environment: workspace-base-environments/databricks_ai_v6.
+environment:
+  version: databricks_ai_v6
+
+# Same names the bundle passes via run_config.env. Keep these in sync with the
+# bundle variables (databricks.yml) or override them per run.
+env_variables:
+  CATALOG: cmegdemos_catalog
+  SCHEMA: mlb_air_migration
+  MODEL_NAME: mlb_yolo_detector
+  EPOCHS: "30"
+
+# Upload only the training code (a subdirectory, not the repo root).
+code_source:
+  root_path: src/train
+
+max_retries: 0 # don't burn GPU time on blind retries
+timeout_minutes: 60
+
+# Same launcher as the bundle task (src/train/command.sh).
+command: |
+  for d in "${CODE_SOURCE_PATH:-}" "${CODE_SOURCE_PATH:-}/train" "$PWD"; do
+    if [ -n "$d" ] && [ -f "$d/command.sh" ]; then cd "$d"; break; fi
+  done
+  bash command.sh

@@ -23,9 +23,9 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--catalog", default="cmegdemos_catalog")
-    p.add_argument("--schema", default="mlb_air_migration")
-    p.add_argument("--model_name", default="mlb_yolo_detector")
+    p.add_argument("--catalog", required=True)
+    p.add_argument("--schema", required=True)
+    p.add_argument("--model_name", required=True)
     p.add_argument("--alias", default="champion")
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--max_images", type=int, default=60)

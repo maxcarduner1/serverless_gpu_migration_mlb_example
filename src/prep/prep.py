@@ -67,8 +67,8 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--catalog", default="cmegdemos_catalog")
-    p.add_argument("--schema", default="mlb_air_migration")
+    p.add_argument("--catalog", required=True)
+    p.add_argument("--schema", required=True)
     p.add_argument("--volume", default="raw_images")
     p.add_argument("--max_train", type=int, default=1800, help="total across datasets")
     p.add_argument("--max_val", type=int, default=300)
@@ -87,10 +87,39 @@ def get_api_key():
 
 
 # --------------------------------------------------------------------------- Roboflow
+class RoboflowError(RuntimeError):
+    """Roboflow HTTP failure with a sanitized message (no API key, no signed URLs)."""
+
+
+def _redact(url):
+    """Drop the query string. It holds the api_key, or the signature of a signed download link."""
+    return str(url).split("?", 1)[0]
+
+
+def rf_get(url, api_key=None, *, what, **kwargs):
+    """GET from Roboflow. Errors are re-raised without the API key or signed URLs.
+
+    requests puts the full request URL (including `?api_key=...`) into the text of HTTPError and
+    ConnectionError. So we catch every RequestException and raise a new error built only from
+    the status code and the redacted URL. `from None` drops the original exception, which holds
+    the key, from the traceback.
+    """
+    params = {"api_key": api_key} if api_key else None
+    try:
+        r = requests.get(url, params=params, **kwargs)
+        r.raise_for_status()
+        return r
+    except requests.RequestException as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        raise RoboflowError(
+            f"Roboflow request failed ({what}): {type(e).__name__}"
+            f"{f' HTTP {status}' if status else ''} for {_redact(url)}"
+        ) from None
+
+
 def pick_version(ds, api_key, min_images):
     """Return the smallest version that still has >= min_images (fewer bytes to download)."""
-    r = requests.get(f"{API}/{ds['workspace']}/{ds['project']}", params={"api_key": api_key}, timeout=60)
-    r.raise_for_status()
+    r = rf_get(f"{API}/{ds['workspace']}/{ds['project']}", api_key, what="list versions", timeout=60)
     versions = r.json().get("versions", [])
     if not versions:
         raise RuntimeError(f"No dataset versions published for {ds['url']}")
@@ -115,23 +144,24 @@ def download_once(ds, api_key, sources_dir, min_images):
     version = pick_version(ds, api_key, min_images)
     url = f"{API}/{ds['workspace']}/{ds['project']}/{version}/yolov8"
     for _ in range(60):  # Roboflow may need to generate the export first
-        r = requests.get(url, params={"api_key": api_key}, timeout=120)
-        r.raise_for_status()
-        link = r.json().get("export", {}).get("link")
+        r = rf_get(url, api_key, what="request export", timeout=120)
+        link = r.json().get("export", {}).get("link")  # signed URL: never printed
         if link:
             break
         print(f"[{ds['project']}] export being generated ... {r.json().get('progress')}")
         time.sleep(10)
     else:
-        raise TimeoutError(f"Roboflow export did not become ready for {url}")
+        raise TimeoutError(f"Roboflow export did not become ready for {_redact(url)}")
 
     target = sources_dir / f"{slug}__v{version}.zip"
     tmp = Path(tempfile.mkdtemp()) / target.name
-    with requests.get(link, stream=True, timeout=600) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as f:
+    resp = rf_get(link, what="download export", stream=True, timeout=600)
+    try:
+        with resp, open(tmp, "wb") as f:
             for chunk in resp.iter_content(1 << 20):
                 f.write(chunk)
+    except requests.RequestException as e:  # mid-stream failure: hide the signed link
+        raise RoboflowError(f"Roboflow export download interrupted: {type(e).__name__}") from None
     shutil.copyfile(tmp, target)  # write the final file only once it is complete
     print(f"[{ds['project']}] downloaded {tmp.stat().st_size / 1e6:.1f} MB -> {target}")
     return target

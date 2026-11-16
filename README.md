@@ -19,19 +19,24 @@ resources/mlb_air_yolo_train.job.yml   job: prep -> train -> infer (both ai_runt
 src/prep/prep.py                       serverless CPU: Roboflow -> UC Volume, class merge, subsample, manifest table
 src/train/train.py                     YOLOv8s fine-tune, MLflow logging, Volume checkpoints, UC model registration
 src/train/yolo_pyfunc.py               MLflow pyfunc wrapper (image_path -> detections JSON)
-src/train/command.sh                   launch script used by the ai_runtime_task
+src/train/command.sh                   GPU launcher (used by the ai_runtime_task and by train.yaml)
 src/infer/infer.py                     GPU batch inference -> annotated images, montage/GIF, predictions.parquet
 src/infer/command.sh                   launch script used by the infer ai_runtime_task
 src/publish/publish.py                 serverless CPU: predictions.parquet -> Delta table
-train.yaml                             `databricks air run` workload (same training code)
+train.yaml                             `databricks air run` workload (same training code and launcher)
+scripts/package_code.sh                artifact build: tars src/<component> + run_config.env (bundle vars)
 legacy/notebook_before.py              BEFORE: serverless_gpu notebook (deprecated API)
 docs/migration.md                      serverless_gpu -> AI Runtime migration notes
 ```
 
 ## Prerequisites
 
-* Databricks CLI ≥ 1.22 (`databricks air`, `ai_runtime_task` in bundles), authenticated to the workspace.
-* Unity Catalog schema (default `cmegdemos_catalog.mlb_air_migration`; override with `--var catalog=… --var schema=…`).
+* Databricks CLI ≥ 1.22 (`databricks air`, `ai_runtime_task` in bundles), plus a CLI profile for your
+  workspace (`databricks auth login --host <workspace-url> --profile <profile>`). The bundle
+  doesn't hardcode a host. The workspace comes from `-p <profile>` (or `DATABRICKS_HOST`).
+* `bash` and `tar` locally (the artifact build step packages the GPU code).
+* A Unity Catalog schema. Defaults are `cmegdemos_catalog.mlb_air_migration`; override them with
+  `--var catalog=… --var schema=…` (and `--var model_name=…`) on validate/deploy/run.
 * Two volumes in that schema:
   ```bash
   databricks volumes create cmegdemos_catalog mlb_air_migration raw_images MANAGED -p <profile>
@@ -49,7 +54,15 @@ docs/migration.md                      serverless_gpu -> AI Runtime migration no
 databricks bundle validate -t dev -p <profile>
 databricks bundle deploy   -t dev -p <profile>
 databricks bundle run mlb_air_yolo_train -t dev -p <profile>
+
+# another catalog/schema: pass the same --var flags to deploy (they are baked into the GPU code archives)
+databricks bundle deploy -t dev -p <profile> --var catalog=my_catalog --var schema=my_schema
 ```
+
+How the variables reach each task: prep and publish get `--catalog/--schema` as task parameters.
+`ai_runtime_task` has no parameters field. So the artifact build (`scripts/package_code.sh`) writes
+`run_config.env` (`CATALOG`, `SCHEMA`, `MODEL_NAME`) into the train and infer code tarballs, and
+`command.sh` sources it. None of the scripts have catalog/schema defaults. A missing value fails fast.
 
 The job (`max_concurrent_runs: 1`) has four tasks:
 
@@ -84,11 +97,15 @@ Once prep has run at least once (the dataset is on the Volume):
 ```bash
 databricks air run -f train.yaml --dry-run -p <profile>   # validate against the workspace
 databricks air run -f train.yaml --watch   -p <profile>   # submit + stream logs
+databricks air run -f train.yaml --watch   -p <profile> \
+    --override env_variables.CATALOG=my_catalog --override env_variables.SCHEMA=my_schema
 ```
 
 `train.yaml` uploads only `src/train` (`code_source.root_path`). It uses the same accelerator
 (`GPU_1xA10`) and the same AI v6 environment (`version: databricks_ai_v6`) as the bundle task, with
-`max_retries: 0` and `timeout_minutes: 60`. To turn it into a bundle scaffold:
+`max_retries: 0` and `timeout_minutes: 60`. It runs the same `src/train/command.sh`. Catalog, schema,
+and model come from `env_variables` (`CATALOG`, `SCHEMA`, `MODEL_NAME`), which mirror the bundle
+variable defaults. To turn it into a bundle scaffold:
 
 ```bash
 databricks air convert-to-dabs train.yaml --output-dir /tmp/air-bundle
@@ -134,8 +151,11 @@ Pretrained weights (`yolov8s.pt`) and the `ultralytics` library are © Ultralyti
 * `ai_runtime_task.code_source_path` is resolved from the bundle root, not relative to the
   resources file. Inside the node, the archive is unpacked at `$CODE_SOURCE_PATH/<subdir>`, and
   `MLFLOW_RUN_ID` / `MLFLOW_EXPERIMENT_ID` are injected (`mlflow.start_run()` resumes that run).
-* `ai_runtime_task` has no task parameters. Hyperparameters live in `src/train/command.sh` and
-  `train.yaml`. Catalog, schema, and model name default to the bundle defaults in the scripts.
+* `ai_runtime_task` has no task parameters. Catalog, schema, and model reach the GPU nodes via
+  `run_config.env` in the code tarball (see above). Epochs and base model are `EPOCHS` / `BASE_MODEL`
+  in `command.sh` (defaults 30 / `yolov8s.pt`).
+* The Roboflow key is read only in the prep task. All Roboflow HTTP errors are re-raised with the
+  query string (API key, signed download URL) removed. The signed export link is never printed.
 * Dataset size: `prep.py --max_train/--max_val/--max_test`. Training length: `--epochs`. 30 epochs on
   1,800 images took about 8.5 min of training on one A10 (about 11 min for the whole task, including
   provisioning and environment setup).

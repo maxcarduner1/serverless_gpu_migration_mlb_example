@@ -25,7 +25,9 @@ resources:
               - --catalog=${var.catalog}
               - --schema=${var.schema}
 
-        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime)
+        # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime).
+        #    ai_runtime_task has no parameters field. catalog/schema/model_name reach the node
+        #    via run_config.env, which the train_code artifact build writes from ${var.*}.
         - task_key: train
           depends_on:
             - task_key: prep
@@ -45,7 +47,8 @@ resources:
                   accelerator_type: GPU_1xA10
                   accelerator_count: 1
 
-        # 3) GPU: batch inference on the held-out images (same AI env as training)
+        # 3) GPU: batch inference on the held-out images (same AI env as training).
+        #    Variables arrive via run_config.env in the infer_code artifact (see databricks.yml).
         - task_key: infer
           depends_on:
             - task_key: train

@@ -12,8 +12,8 @@ from pyspark.sql import SparkSession
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--catalog", default="cmegdemos_catalog")
-    p.add_argument("--schema", default="mlb_air_migration")
+    p.add_argument("--catalog", required=True)
+    p.add_argument("--schema", required=True)
     args = p.parse_known_args()[0]
 
     base = Path(f"/Volumes/{args.catalog}/{args.schema}/artifacts/inference")

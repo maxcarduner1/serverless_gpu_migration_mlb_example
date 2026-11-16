@@ -1,31 +1,34 @@
 # MLB CV demo: Serverless GPU (AI Runtime) training with the native
 # `ai_runtime_task` DABs task type.
 #
-#   databricks bundle validate -t dev -p DEFAULT
-#   databricks bundle deploy   -t dev -p DEFAULT
-#   databricks bundle run mlb_air_yolo_train -t dev -p DEFAULT
+# The workspace comes from the CLI profile you select (-p) or DATABRICKS_HOST.
+# No host is hardcoded here.
+#
+#   databricks bundle validate -t dev -p <profile>
+#   databricks bundle deploy   -t dev -p <profile> [--var catalog=... --var schema=...]
+#   databricks bundle run mlb_air_yolo_train -t dev -p <profile>
 bundle:
   name: mlb_air_yolo_demo
 
 include:
   - resources/*.yml
 
-# Package the GPU code (src/train, src/infer) as tarballs. `ai_runtime_task`
-# unpacks them on every GPU node. This is the same layout that
-# `databricks air convert-to-dabs train.yaml` generates.
+# Package the GPU code (src/train, src/infer) as tarballs. `ai_runtime_task` unpacks
+# them on every GPU node (same layout as `databricks air convert-to-dabs` emits).
+# ai_runtime_task has no task parameters, so the build step also writes the bundle
+# variables into <component>/run_config.env inside the tarball. command.sh sources
+# that file, so `--var catalog=... --var schema=...` reaches the GPU tasks too.
 artifacts:
   train_code:
     type: tgz
-    path: src
-    include:
-      - train
+    path: .
+    build: bash scripts/package_code.sh train ${var.catalog} ${var.schema} ${var.model_name}
     files:
       - source: ./dist/train_code.tgz
   infer_code:
     type: tgz
-    path: src
-    include:
-      - infer
+    path: .
+    build: bash scripts/package_code.sh infer ${var.catalog} ${var.schema} ${var.model_name}
     files:
       - source: ./dist/infer_code.tgz
 
@@ -47,5 +50,4 @@ targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://fevm-cmegdemos.cloud.databricks.com
+    # workspace.host intentionally omitted: it comes from the selected profile.

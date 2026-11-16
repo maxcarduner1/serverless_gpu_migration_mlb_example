@@ -32,9 +32,9 @@ sys.path.insert(0, str(HERE))  # so yolo_pyfunc imports regardless of cwd
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--catalog", default="cmegdemos_catalog")
-    p.add_argument("--schema", default="mlb_air_migration")
-    p.add_argument("--model_name", default="mlb_yolo_detector")
+    p.add_argument("--catalog", required=True)
+    p.add_argument("--schema", required=True)
+    p.add_argument("--model_name", required=True)
     p.add_argument("--base_model", default="yolov8s.pt")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--imgsz", type=int, default=640)

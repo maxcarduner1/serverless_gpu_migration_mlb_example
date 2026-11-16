@@ -27,9 +27,10 @@
 
 dbutils.widgets.text("catalog", "cmegdemos_catalog", "Catalog")
 dbutils.widgets.text("schema", "mlb_air_migration", "Schema")
+dbutils.widgets.text("model_name", "mlb_yolo_detector", "Model")  # not used by prep; every job task gets the same parameters
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
-print(f"catalog={CATALOG} schema={SCHEMA}")
+print(f"catalog={CATALOG} schema={SCHEMA} model_name={dbutils.widgets.get('model_name')}")
 
 # COMMAND ----------
 

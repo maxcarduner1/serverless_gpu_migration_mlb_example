@@ -24,6 +24,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              model_name: ${var.model_name}
 
         # 2) GPU: YOLOv8 fine-tune on Serverless GPU (AI Runtime) -- "step 03" of the notebook story.
         #    GENERATED from train.yaml by `databricks air convert-to-dabs train.yaml` (an ai_runtime_task

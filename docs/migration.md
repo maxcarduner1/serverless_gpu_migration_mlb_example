@@ -14,7 +14,7 @@ Researched 2026-11-16 against Databricks CLI v1.22.1 and the public docs.
 | Prep task, then GPU task, in one job? | **Yes.** Use an ordinary `depends_on` DAG. CPU prep runs on serverless; GPU training runs as `ai_runtime_task`. This is the documented pattern (H). |
 | Should a notebook task call `databricks air run`? | **No.** It creates a hidden nested run, wastes idle CPU while it polls, splits retries and lineage, and needs CLI auth inside the job. |
 | Can a DAB `ai_runtime_task` reference a `train.yaml`? | **No, it has to be generated.** The task schema has no field that points to a YAML config. `databricks air convert-to-dabs train.yaml` generates the task, so keep `train.yaml` as the source of truth and diff the committed task against a fresh conversion (H, CLI v1.22.1 schema + output). |
-| Can a `@distributed` notebook on serverless GPU run as a job task? | **Yes.** Use a `notebook_task` with `compute.hardware_accelerator` and an AI base environment. See §1A. |
+| Can a `@distributed` notebook on serverless GPU run as a job task? | **Yes.** Use a `notebook_task` with `compute.hardware_accelerator` and an AI base environment (docs + a one-time run that started on an A10 and launched `@distributed`). See §1A. |
 | Migration effort | **S** for the required package rename. **M** to move from notebook to CLI script, most of which is re-validating dependencies on CUDA 13 and torch 2.11. |
 
 ---
@@ -57,6 +57,11 @@ environments:
   - environment_key: ai_v6
     spec: {base_environment: workspace-base-environments/databricks_ai_v6}
 ```
+
+**Single-GPU gotcha:** `@distributed` exports `RANK`/`LOCAL_RANK`/`WORLD_SIZE` for `torch.distributed` but creates no
+process group. Libraries that switch to DDP mode on those variables, such as ultralytics, then fail with
+"Default process group has not been initialized". With one GPU, hide the variables while the library imports, or
+call `torch.distributed.init_process_group` yourself.
 
 A workspace admin must enable the *Serverless workspace base environment support in Jobs* preview. You can't add
 dependencies through the Environments panel for these jobs. Use `%pip` in the notebook for anything extra.
@@ -168,7 +173,7 @@ See the demo bundle in this repo for the working version.
 | Option | Verdict |
 |---|---|
 | **(a) Native `ai_runtime_task`** | **Recommended.** Declarative, in git, multi-node, 14-day cap, job-level retries, and a normal DAG. Downsides: Preview, one deployment only, and the secrets gap. |
-| (c) `notebook_task` with `compute.hardware_accelerator` and `@distributed` | Smallest change for a notebook-first team, and it works as a job task (verified, §1A). Single-node, 2-day cap. The AI base env in Jobs is Beta and preview-gated. |
+| (c) `notebook_task` with `compute.hardware_accelerator` and `@distributed` | Smallest change for a notebook-first team, and it runs as a job task (§1A). Single-node, 2-day cap. The AI base env in Jobs is Beta and preview-gated. |
 | (b) A task that shells out to `air run`, the SDK or REST | **Avoid.** Hidden nested run, idle CPU while polling, retries and lineage split across two runs. |
 | (d) `run_job_task` pointing at a separate GPU job | Only worth it to reuse one training job across several parent pipelines. |
 | (d) `python_wheel_task` / `spark_python_task` with a GPU accelerator | Allowed by the schema, but there are no docs for it (L). Don't recommend it. |

@@ -150,13 +150,17 @@ from PIL import Image, ImageSequence
 MAX_HTML_BYTES = 3_000_000  # cell output is capped at ~10 MB; base64 adds a third
 
 
-def small_gif(path, width=480):
-    """Re-encode the GIF smaller if needed, so it renders inline (the original is ~7 MB)."""
+def small_gif(path, width=400, max_frames=12):
+    """Re-encode the GIF smaller if needed, so it renders inline (the original is ~7.5 MB; this is ~2 MB)."""
     raw = Path(path).read_bytes()
     if len(raw) <= MAX_HTML_BYTES:
         return raw
     im = Image.open(path)
-    frames = [f.convert("RGB").resize((width, int(width * f.height / f.width))) for f in ImageSequence.Iterator(im)]
+    frames = []
+    for i, f in enumerate(ImageSequence.Iterator(im)):  # convert while iterating: frames share one object
+        if i >= max_frames:
+            break
+        frames.append(f.convert("RGB").resize((width, int(width * f.height / f.width))))
     buf = io.BytesIO()
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
                    duration=im.info.get("duration", 700), loop=0, optimize=True)
@@ -166,7 +170,7 @@ def small_gif(path, width=480):
 gif = run_dir / "demo.gif"
 if gif.exists():
     data = base64.b64encode(small_gif(gif)).decode()
-    displayHTML(f'<img src="data:image/gif;base64,{data}" style="max-width:640px;border-radius:6px"/>'
+    displayHTML(f'<img src="data:image/gif;base64,{data}" style="width:480px;border-radius:6px"/>'
                 f"<br><small>demo.gif · inference {ts}</small>")
 
 # COMMAND ----------

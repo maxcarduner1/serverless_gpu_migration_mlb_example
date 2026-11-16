@@ -185,6 +185,11 @@ Pretrained weights (`yolov8s.pt`) and the `ultralytics` library are © Ultralyti
   opencv, and CUDA wheels from PyPI, and the process aborted with `OpenSSL ... FATAL FIPS SELFTEST FAILURE`.
   The same thing happened for CPU inference on serverless with PyPI ultralytics, which is why
   inference also runs on the AI GPU env and only the Delta write runs on CPU.
+* **`@distributed` on one GPU:** it exports `RANK`/`LOCAL_RANK`/`WORLD_SIZE` without creating a
+  `torch.distributed` process group, so ultralytics goes into DDP mode and fails ("Default process group has not
+  been initialized"). Notebook 02 hides those variables while ultralytics imports. One earlier notebook-job attempt
+  also failed once, before training started, with `Intel oneMKL FATAL ERROR: Cannot load .../libtorch_cpu.so` in
+  the `@distributed` child. The next run with the same environment imported torch fine, so treat it as intermittent.
 * **Ship many small files as one archive.** Copying about 4.3k images and labels file-by-file from
   the Volume took about 14 minutes on the GPU node. Copying one ~150 MB tar and extracting it locally took 3 s.
 * `ai_runtime_task.code_source_path` is resolved from the bundle root, not relative to the
